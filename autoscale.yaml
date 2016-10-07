@@ -1,0 +1,167 @@
+heat_template_version: 2014-10-16
+
+description: Template that installs a cluster resource group and master node.
+
+#####################################
+# PARAMETERS
+#####################################
+parameters:
+  image:
+    type: string
+    label: Image name or ID
+    description: Image to be used for server. Please use an Ubuntu based image.
+    default: 74070fde-45cd-418c-8fc9-32aeca57d871
+  flavor:
+    type: string
+    label: Flavor
+    description: Type of instance (flavor) to be used on the compute instance.
+    default: m1.small
+  key:
+    type: string
+    label: Key name
+    description: Name of key-pair to be installed on the compute instance.
+    default: autoscale-remote
+  public_network:
+    type: string
+    label: Public network name or ID
+    description: Public network to attach server to.
+    default: public
+  cluster_size:
+    type: number
+    label: Cluster size
+    description: Number of instances in cluster.
+    default: 1
+
+#####################################
+# RESOURCES
+#####################################
+resources:
+  # NETWORKS
+  private_network:
+    type: OS::Neutron::Net
+
+  private_subnet:
+    type: OS::Neutron::Subnet
+    properties:
+      network_id: { get_resource: private_network }
+      cidr: 10.4.0.0/24
+      dns_nameservers: [8.8.8.8]
+
+  router:
+    type: OS::Neutron::Router
+    properties:
+      external_gateway_info:
+        network: { get_param: public_network }
+
+  router-interface:
+    type: OS::Neutron::RouterInterface
+    properties:
+      router_id: { get_resource: router }
+      subnet: { get_resource: private_subnet }
+
+  secgroup_autoscale:
+    type: OS::Neutron::SecurityGroup
+    properties:
+      rules:
+        - protocol: icmp
+        - protocol: udp
+        - protocol: tcp
+          port_range_min: 22
+          port_range_max: 22
+        - protocol: tcp
+          port_range_min: 443
+          port_range_max: 443
+        - remote_mode: remote_group_id
+
+  # PROVISIONING SCRIPTS
+  provision_instance:
+    type: OS::Heat::SoftwareConfig
+    properties:
+      group: ungrouped
+      config: {get_file: provision.sh}
+
+  install_master:
+    type: OS::Heat::MultipartMime
+    properties:
+      parts:
+        - config: {get_resource: provision_instance}
+        - config: kubeadm init --token 30f54b.f400ed0dc93169df --pod-network-cidr 10.17.0.0/16
+
+  install_minion:
+    type: OS::Heat::MultipartMime
+    properties:
+      parts:
+        - config: {get_resource: provision_instance}
+        - config:
+            str_replace:
+              template: kubeadm join --token 30f54b.f400ed0dc93169df $$master_ip
+              params:
+                "$$master_ip": {get_attr: [kube_master_eth0, fixed_ips, 0, ip_address]}
+
+  # MASTER NODE
+  master:
+    type: OS::Nova::Server
+    depends_on:
+      - router-interface
+    properties:
+      image: {get_param: image}
+      flavor: {get_param: flavor}
+      key_name: {get_param: key}
+      user_data_format: RAW
+      user_data: {get_resource: install_master}
+      networks:
+        - port: {get_resource: kube_master_eth0}
+
+  kube_master_eth0:
+    type: OS::Neutron::Port
+    properties:
+      network: {get_resource: private_network}
+      security_groups:
+        - {get_resource: secgroup_autoscale}
+      fixed_ips:
+        - subnet: {get_resource: private_subnet}
+      replacement_policy: AUTO
+
+  kube_master_floating:
+      type: OS::Neutron::FloatingIP
+      properties:
+        floating_network: {get_param: public_network}
+        port_id: {get_resource: kube_master_eth0}
+
+  # MINION NODES
+  node_cluster:
+    type: OS::Heat::AutoScalingGroup
+    depends_on:
+      - router-interface
+      - master
+    properties:
+      min_size: 0
+      max_size: 20
+      desired_capacity: { get_param: cluster_size }
+      #count: { get_param: cluster_size }
+      resource:
+        type: OS::Nova::Server
+        properties:
+          image: { get_param: image }
+          flavor: { get_param: flavor }
+          key_name: { get_param: key }
+          user_data_format: RAW
+          user_data: {get_resource: install_minion}
+          networks:
+            - port: {get_resource: kube_minion_eth0}
+
+  kube_minion_eth0:
+    type: OS::Neutron::Port
+    properties:
+      network: {get_resource: private_network}
+      security_groups:
+        - {get_resource: secgroup_autoscale}
+      fixed_ips:
+        - subnet: {get_resource: private_subnet}
+      replacement_policy: AUTO
+
+  kube_minion_floating:
+    type: OS::Neutron::FloatingIP
+    properties:
+      floating_network: {get_param: public_network}
+      port_id: {get_resource: kube_minion_eth0}
