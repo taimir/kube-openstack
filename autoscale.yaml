@@ -36,6 +36,13 @@ parameters:
 # RESOURCES
 #####################################
 resources:
+  # USERS
+  k8s_user:
+    type: OS::Heat::SoftwareConfig
+    properties:
+      group: ungrouped
+      config: {get_file: k8s-user.yaml}
+
   # NETWORKS
   private_network:
     type: OS::Neutron::Net
@@ -95,6 +102,7 @@ resources:
     properties:
       parts:
         - config: {get_resource: provision_instance}
+        - config: {get_resource: k8s_user}
         - config:
             str_replace:
               template: |
@@ -109,6 +117,7 @@ resources:
     properties:
       parts:
         - config: {get_resource: provision_instance}
+        - config: {get_resource: k8s_user}
         - config:
             str_replace:
               template: |
