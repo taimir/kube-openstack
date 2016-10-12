@@ -15,6 +15,7 @@ spec:
       labels:
         app: cluster-autoscaler
     spec:
+      hostNetwork: true
       containers:
         - image: taimir93/cluster-autoscaler:v0.1
           name: cluster-autoscaler
@@ -29,9 +30,17 @@ spec:
             - ./cluster-autoscaler
             - --v=4
             - --cloud-provider=openstack-heat
-            - --cloud-config=heat-config.ini
-            - --nodes=1:10:tiny_cluster:autoscale:cluster_size
+            - --cloud-config=/home/ubuntu/heat-config.ini
+            - --nodes=1:10:node_cluster:autoscale:cluster_size
+            - --leader-elect=false
           env:
             - name: OS_REGION_NAME
               value: RegionOne
           imagePullPolicy: "Always"
+          volumeMounts:
+          - name: config
+            mountPath: /home/ubuntu
+      volumes:
+        - name: config
+          hostPath:
+            path: /home/ubuntu
