@@ -1,4 +1,4 @@
-heat_template_version: 2014-10-16
+heat_template_version: 2016-10-14
 
 description: Template that installs a cluster resource group and master node.
 
@@ -10,7 +10,7 @@ parameters:
     type: string
     label: Image name or ID
     description: Image to be used for server. Please use an Ubuntu based image.
-    default: 74070fde-45cd-418c-8fc9-32aeca57d871
+    default: Ubuntu1604
   flavor:
     type: string
     label: Flavor
@@ -20,7 +20,7 @@ parameters:
     type: string
     label: Key name
     description: Name of key-pair to be installed on the compute instance.
-    default: autoscale-remote
+    default: k8s-autoscale
   public_network:
     type: string
     label: Public network name or ID
@@ -41,7 +41,7 @@ resources:
     type: OS::Heat::SoftwareConfig
     properties:
       group: ungrouped
-      config: {get_file: k8s-user.yaml}
+      config: {get_file: https://raw.githubusercontent.com/taimir/kube-openstack/master/k8s-user.yaml}
 
   # NETWORKS
   private_network:
@@ -52,7 +52,7 @@ resources:
     properties:
       network_id: { get_resource: private_network }
       cidr: 10.4.0.0/24
-      dns_nameservers: [8.8.8.8]
+      dns_nameservers: [8.8.8.8, 8.8.4.4]
 
   router:
     type: OS::Neutron::Router
@@ -81,21 +81,21 @@ resources:
         - remote_mode: remote_group_id
 
   # MASTER WAIT CONDITION
-  master_wait_handle:
-    type: OS::Heat::WaitConditionHandle
-
-  master_wait_condition:
-    type: OS::Heat::WaitCondition
-    depends_on: master
-    properties:
-      handle: {get_resource: master_wait_handle}
-      timeout: 6000
+  # master_wait_handle:
+  #   type: OS::Heat::WaitConditionHandle
+  #
+  # master_wait_condition:
+  #   type: OS::Heat::WaitCondition
+  #   depends_on: master
+  #   properties:
+  #     handle: {get_resource: master_wait_handle}
+  #     timeout: 6000
 
   provision_instance:
     type: OS::Heat::SoftwareConfig
     properties:
       group: ungrouped
-      config: {get_file: provision.sh}
+      config: {get_file: https://raw.githubusercontent.com/taimir/kube-openstack/master/provision.sh}
 
   install_master:
     type: OS::Heat::MultipartMime
@@ -103,14 +103,14 @@ resources:
       parts:
         - config: {get_resource: provision_instance}
         - config: {get_resource: k8s_user}
-        - config:
-            str_replace:
-              template: |
-                #!/bin/bash
-                kubeadm init --token 30f54b.f400ed0dc93169df --pod-network-cidr 10.17.0.0/16 --cloud-provider openstack
-                $wait_notify --data-binary '{"status": "SUCCESS"}' || $wait_notify --data-binary '{"status": "FAILURE"}' &
-              params:
-                $wait_notify: {get_attr: [master_wait_handle, curl_cli]}
+        # - config:
+        #     str_replace:
+        #       template: |
+        #         #!/bin/bash
+        #         kubeadm init --token 30f54b.f400ed0dc93169df --pod-network-cidr 10.17.0.0/16 --cloud-provider openstack
+        #         $wait_notify --data-binary '{"status": "SUCCESS"}' || $wait_notify --data-binary '{"status": "FAILURE"}' &
+        #       params:
+        #         $wait_notify: {get_attr: [master_wait_handle, curl_cli]}
 
   install_minion:
     type: OS::Heat::MultipartMime
@@ -118,13 +118,13 @@ resources:
       parts:
         - config: {get_resource: provision_instance}
         - config: {get_resource: k8s_user}
-        - config:
-            str_replace:
-              template: |
-                #!/bin/bash
-                kubeadm join --token 30f54b.f400ed0dc93169df $master_ip
-              params:
-                $master_ip: {get_attr: [kube_master_eth0, fixed_ips, 0, ip_address]}
+        # - config:
+        #     str_replace:
+        #       template: |
+        #         #!/bin/bash
+        #         kubeadm join --token 30f54b.f400ed0dc93169df $master_ip
+        #       params:
+        #         $master_ip: {get_attr: [kube_master_eth0, fixed_ips, 0, ip_address]}
 
   # MASTER NODE
   master:
@@ -135,7 +135,7 @@ resources:
       image: {get_param: image}
       flavor: {get_param: flavor}
       key_name: {get_param: key}
-      personality: {"/home/ubuntu/heat-config.ini": {get_file: "heat-config.ini"}, "/home/ubuntu/deployment.yaml": {get_file: "deployment.yaml"}, "/etc/kubernetes/cloud-config.json": {get_file: "heat-config.ini"}}
+      personality: {"/home/k8s/heat-config.ini": {get_file: https://raw.githubusercontent.com/taimir/kube-openstack/master/heat-config.ini}, "/home/k8s/deployment.yaml": {get_file: https://raw.githubusercontent.com/taimir/kube-openstack/master/deployment.yaml}}
       user_data_format: RAW
       user_data: {get_resource: install_master}
       networks:
@@ -148,8 +148,7 @@ resources:
       security_groups:
         - {get_resource: secgroup_autoscale}
       fixed_ips:
-        - subnet: {get_resource: private_subnet}
-      replacement_policy: AUTO
+        - ip_address: 10.4.0.3
 
   kube_master_floating:
       type: OS::Neutron::FloatingIP
@@ -158,11 +157,16 @@ resources:
         port_id: {get_resource: kube_master_eth0}
 
   # MINION NODES
+  server_name_post_fix:
+    type: OS::Heat::RandomString
+    properties:
+      length: 8
+
   node_cluster:
     type: OS::Heat::AutoScalingGroup
     depends_on:
       - router-interface
-      - master_wait_condition
+      # - master_wait_condition
     properties:
       min_size: 0
       max_size: 20
@@ -174,7 +178,9 @@ resources:
           image: { get_param: image }
           flavor: { get_param: flavor }
           key_name: { get_param: key }
-          personality: {"/home/ubuntu/heat-config.ini": {get_file: "heat-config.ini"}}
+          name:
+            list_join: [-, [node, {get_resource: server_name_post_fix}]]
+          personality: {"/home/k8s/heat-config.ini": {get_file: https://raw.githubusercontent.com/taimir/kube-openstack/master/heat-config.ini}}
           user_data_format: RAW
           user_data: {get_resource: install_minion}
           networks:
