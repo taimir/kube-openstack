@@ -1,6 +1,6 @@
 heat_template_version: 2016-10-14
 
-description: Template that installs a cluster resource group and master node.
+description: Template that installs a k8s cluster resource group and a master node.
 
 #####################################
 # PARAMETERS
@@ -53,6 +53,7 @@ resources:
       network_id: { get_resource: private_network }
       cidr: 10.4.0.0/24
       dns_nameservers: [8.8.8.8, 8.8.4.4]
+      gateway_ip: 10.4.0.1
 
   router:
     type: OS::Neutron::Router
@@ -60,7 +61,7 @@ resources:
       external_gateway_info:
         network: { get_param: public_network }
 
-  router-interface:
+  router_interface:
     type: OS::Neutron::RouterInterface
     properties:
       router_id: { get_resource: router }
@@ -81,15 +82,15 @@ resources:
         - remote_mode: remote_group_id
 
   # MASTER WAIT CONDITION
-  # master_wait_handle:
-  #   type: OS::Heat::WaitConditionHandle
-  #
-  # master_wait_condition:
-  #   type: OS::Heat::WaitCondition
-  #   depends_on: master
-  #   properties:
-  #     handle: {get_resource: master_wait_handle}
-  #     timeout: 6000
+  master_wait_handle:
+    type: OS::Heat::WaitConditionHandle
+
+  master_wait_condition:
+    type: OS::Heat::WaitCondition
+    depends_on: master
+    properties:
+      handle: {get_resource: master_wait_handle}
+      timeout: 6000
 
   provision_instance:
     type: OS::Heat::SoftwareConfig
@@ -136,36 +137,20 @@ resources:
     type: OS::Heat::MultipartMime
     properties:
       parts:
-        - config: {get_resource: provision_instance}
         - config: {get_resource: k8s_user}
-        # - config:
-        #     str_replace:
-        #       template: |
-        #         #!/bin/bash
-        #         kubeadm init --token 30f54b.f400ed0dc93169df --pod-network-cidr 10.17.0.0/16 --cloud-provider openstack
-        #         $wait_notify --data-binary '{"status": "SUCCESS"}' || $wait_notify --data-binary '{"status": "FAILURE"}' &
-        #       params:
-        #         $wait_notify: {get_attr: [master_wait_handle, curl_cli]}
-
-  install_minion:
-    type: OS::Heat::MultipartMime
-    properties:
-      parts:
         - config: {get_resource: provision_instance}
-        - config: {get_resource: k8s_user}
-        # - config:
-        #     str_replace:
-        #       template: |
-        #         #!/bin/bash
-        #         kubeadm join --token 30f54b.f400ed0dc93169df $master_ip
-        #       params:
-        #         $master_ip: {get_attr: [kube_master_eth0, fixed_ips, 0, ip_address]}
+        - config:
+            str_replace:
+              template: |
+                #!/bin/bash
+                kubeadm init --token 30f54b.f400ed0dc93169df --pod-network-cidr 10.17.0.0/16 --cloud-provider openstack
+                $wait_notify --data-binary '{"status": "SUCCESS"}' || $wait_notify --data-binary '{"status": "FAILURE"}' &
+              params:
+                $wait_notify: {get_attr: [master_wait_handle, curl_cli]}
 
   # MASTER NODE
   master:
     type: OS::Nova::Server
-    depends_on:
-      - router-interface
     properties:
       image: {get_param: image}
       flavor: {get_param: flavor}
@@ -187,53 +172,44 @@ resources:
 
   kube_master_floating:
       type: OS::Neutron::FloatingIP
-      depends_on:
-        - router-interface
       properties:
         floating_network: {get_param: public_network}
         port_id: {get_resource: kube_master_eth0}
 
   # MINION NODES
-  server_name_post_fix:
-    type: OS::Heat::RandomString
+  install_minion:
+    type: OS::Heat::MultipartMime
     properties:
-      length: 8
+      parts:
+        - config: {get_resource: k8s_user}
+        - config: {get_resource: provision_instance}
+        - config:
+            str_replace:
+              template: |
+                #!/bin/bash
+                kubeadm join --token 30f54b.f400ed0dc93169df $master_ip
+              params:
+                $master_ip: {get_attr: [kube_master_eth0, fixed_ips, 0, ip_address]}
 
   node_cluster:
     type: OS::Heat::AutoScalingGroup
     depends_on:
-      - router-interface
-      # - master_wait_condition
+      - master_wait_condition
     properties:
       min_size: 0
-      max_size: 20
+      max_size: 10
       desired_capacity: { get_param: cluster_size }
-      #count: { get_param: cluster_size }
+      # count: { get_param: cluster_size }
       resource:
-        type: OS::Nova::Server
+        type: minion.yaml
         properties:
-          image: { get_param: image }
-          flavor: { get_param: flavor }
-          key_name: { get_param: key }
-          name:
-            list_join: [-, [node, {get_resource: server_name_post_fix}]]
-          personality: {"/home/k8s/heat-config.ini": {get_file: "https://raw.githubusercontent.com/taimir/kube-openstack/master/heat-config.ini"}}
-          user_data_format: RAW
-          user_data: {get_resource: install_minion}
-          networks:
-            - port: {get_resource: kube_minion_eth0}
-
-  kube_minion_eth0:
-    type: OS::Neutron::Port
-    properties:
-      network: {get_resource: private_network}
-      security_groups:
-        - {get_resource: secgroup_autoscale}
-      fixed_ips:
-        - subnet: {get_resource: private_subnet}
-
-  kube_minion_floating:
-    type: OS::Neutron::FloatingIP
-    properties:
-      floating_network: {get_param: public_network}
-      port_id: {get_resource: kube_minion_eth0}
+          private_network: {get_resource: private_network}
+          private_subnet: {get_resource: private_subnet}
+          public_network: {get_param: public_network}
+          secgroup_autoscale: {get_resource: secgroup_autoscale}
+          # provisioning and general config
+          install_minion: {get_resource: install_minion}
+          kube_master_eth0: {get_resource: kube_master_eth0}
+          image: {get_param: image}
+          flavor: {get_param: flavor}
+          key: {get_param: key}
