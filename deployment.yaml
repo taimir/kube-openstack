@@ -32,6 +32,7 @@ spec:
             - --cloud-provider=openstack-heat
             - --cloud-config=/home/k8s/heat-config.ini
             - --nodes=1:10:node_cluster:autoscale:cluster_size
+            - --scale-down-delay=5s
             - --leader-elect=false
           env:
             - name: OS_REGION_NAME
