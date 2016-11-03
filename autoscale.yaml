@@ -81,17 +81,7 @@ resources:
           port_range_max: 443
         - remote_mode: remote_group_id
 
-  # MASTER WAIT CONDITION
-  master_wait_handle:
-    type: OS::Heat::WaitConditionHandle
-
-  master_wait_condition:
-    type: OS::Heat::WaitCondition
-    depends_on: master
-    properties:
-      handle: {get_resource: master_wait_handle}
-      timeout: 6000
-
+  # PROVISIONING
   provision_instance:
     type: OS::Heat::SoftwareConfig
     properties:
@@ -193,8 +183,6 @@ resources:
 
   node_cluster:
     type: OS::Heat::AutoScalingGroup
-    depends_on:
-      - master_wait_condition
     properties:
       min_size: 0
       max_size: 10
